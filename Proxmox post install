@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+# Proxmox VE Post Install Script - Improved
+# Author: Magotel
+# Notes: Automatizează operațiuni post-instalare pe Proxmox VE cu verificări și loguri.
+
+LOGFILE="/var/log/pve-postinstall.log"
+
+# Funcții helper pentru mesaje
+header_info() {
+  clear
+  cat <<"EOF"
+  ██████╗ ██████╗  █████╗ ███╗   ███╗██╗  ██╗ ██████╗ ██╗  ██╗
+  ██╔══██╗██╔══██╗██╔══██╗████╗ ████║██║  ██║██╔════╝ ██║ ██╔╝
+  ██████╔╝██████╔╝███████║██╔████╔██║███████║██║  ███╗█████╔╝ 
+  ██╔═══╝ ██╔═══╝ ██╔══██║██║╚██╔╝██║██╔══██║██║   ██║██╔═██╗ 
+  ██║     ██║     ██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╔╝██║  ██╗
+  ╚═╝     ╚═╝     ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═╝
+    Proxmox VE Post Install Script (Improved Version)
+EOF
+}
+
+msg_info() { echo -e "\033[33m[INFO] $1\033[m" | tee -a "$LOGFILE"; }
+msg_ok() { echo -e "\033[1;92m[OK] $1\033[m" | tee -a "$LOGFILE"; }
+msg_error() { echo -e "\033[31m[ERROR] $1\033[m" | tee -a "$LOGFILE"; }
+
+check_pve_version() {
+  local pve_version
+  pve_version=$(pveversion | grep -oE "pve-manager/[0-9]+\.[0-9]+" | cut -d'/' -f2)
+  if [[ ! $pve_version =~ ^8\.[0-9]+$ ]]; then
+    msg_error "Proxmox VE version $pve_version is not supported. Requires 8.x."
+    exit 1
+  fi
+  msg_ok "Proxmox VE version $pve_version is supported."
+}
+
+backup_file() {
+  local file=$1
+  if [[ -f $file ]]; then
+    cp -n "$file" "${file}.bak"
+    msg_info "Backup created for $file"
+  fi
+}
+
+correct_sources() {
+  msg_info "Correcting Proxmox VE APT sources..."
+  backup_file /etc/apt/sources.list
+  cat <<EOF >/etc/apt/sources.list
+deb http://deb.debian.org/debian bookworm main contrib
+deb http://deb.debian.org/debian bookworm-updates main contrib
+deb http://security.debian.org/debian-security bookworm-security main contrib
+EOF
+  echo 'APT::Get::Update::SourceListWarnings::NonFreeFirmware "false";' >/etc/apt/apt.conf.d/no-bookworm-firmware.conf
+  msg_ok "APT sources corrected."
+}
+
+disable_pve_enterprise() {
+  msg_info "Disabling 'pve-enterprise' repository..."
+  backup_file /etc/apt/sources.list.d/pve-enterprise.list
+  echo "# deb https://enterprise.proxmox.com/debian/pve bookworm pve-enterprise" >/etc/apt/sources.list.d/pve-enterprise.list
+  msg_ok "'pve-enterprise' repository disabled."
+}
+
+disable_subscription_nag() {
+  msg_info "Disabling subscription nag..."
+  if [[ ! -f /etc/apt/apt.conf.d/no-nag-script ]]; then
+    echo "DPkg::Post-Invoke { \"dpkg -V proxmox-widget-toolkit | grep -q '/proxmoxlib\\.js\$'; if [ \$? -eq 1 ]; then { echo 'Removing subscription nag from UI...'; sed -i '/.*data\\.status.*{/{s/\\!//;s/active/NoMoreNagging/}' /usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js; }; fi\"; };" >/etc/apt/apt.conf.d/no-nag-script
+    apt --reinstall install proxmox-widget-toolkit &>>"$LOGFILE"
+    msg_ok "Subscription nag disabled. (Clear browser cache)"
+  else
+    msg_ok "Subscription nag already disabled."
+  fi
+}
+
+update_system() {
+  msg_info "Updating Proxmox VE system..."
+  apt-get update &>>"$LOGFILE"
+  apt-get -y dist-upgrade &>>"$LOGFILE"
+  msg_ok "System updated successfully."
+}
+
+reboot_system() {
+  read -rp "Reboot the system now? (y/n): " yn
+  case $yn in
+    [Yy]*) msg_info "Rebooting..."; reboot ;;
+    *) msg_info "Reboot skipped. Please reboot manually later." ;;
+  esac
+}
+
+main() {
+  header_info
+  echo "Log file: $LOGFILE"
+  touch "$LOGFILE"
+
+  check_pve_version
+  read -rp "Correct APT sources? (y/n): " yn && [[ $yn =~ ^[Yy]$ ]] && correct_sources
+  read -rp "Disable 'pve-enterprise' repository? (y/n): " yn && [[ $yn =~ ^[Yy]$ ]] && disable_pve_enterprise
+  read -rp "Disable subscription nag? (y/n): " yn && [[ $yn =~ ^[Yy]$ ]] && disable_subscription_nag
+  read -rp "Update system now? (y/n): " yn && [[ $yn =~ ^[Yy]$ ]] && update_system
+  reboot_system
+}
+
+main
